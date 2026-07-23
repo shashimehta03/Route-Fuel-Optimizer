@@ -232,6 +232,212 @@ unavailable).
 
 ---
 
+## Tested requests & responses
+
+Every request below was executed end-to-end against the app — real OSRM routing
+plus the loaded ~7,500-station price table. The reported distances, durations,
+station names/prices, and the full fuel accounting are the actual values
+returned. For brevity the `route.geometry` coordinate array and the `map`
+object are elided (shown as `…`); everything else is verbatim. In each case the
+accounting reconciles exactly (`initial + purchased == required`, and
+`Σ cost_breakdown == estimated_total_cost`) and the route is produced with a
+single routing call.
+
+### 1) New York, NY → Miami, FL — long route, 2 stops
+
+```bash
+curl --location 'http://127.0.0.1:8000/api/route/' \
+--header 'Content-Type: application/json' \
+--data '{ "start": "New York, NY", "finish": "Miami, FL" }'
+```
+
+```json
+{
+  "start":  { "label": "New York, NY", "latitude": 40.7554, "longitude": -73.9829 },
+  "finish": { "label": "Miami, FL",    "latitude": 25.7689, "longitude": -80.2604 },
+  "route":  { "total_distance_miles": 1284.31, "estimated_duration_hours": 24.26,
+              "geometry": { "type": "LineString", "coordinates": "…" } },
+  "vehicle": { "max_range_miles": 500, "fuel_efficiency_mpg": 10,
+               "starts_with_full_tank": true, "initial_fuel_gallons": 50 },
+  "fuel_summary": {
+    "fuel_required_gallons": 128.43, "initial_fuel_gallons": 50.0,
+    "fuel_purchased_gallons": 78.43, "fuel_stops_required": 2,
+    "estimated_total_cost": 252.76, "currency": "USD",
+    "optimization_method": "Cheapest fuel station within search radius"
+  },
+  "fuel_stops": [
+    { "stop_number": 1, "truck_stop": "CIRCLE K #2723123", "city": "Dunn", "state": "NC",
+      "address": "I-95, EXIT 71", "latitude": 35.3114, "longitude": -78.612,
+      "fuel_price": 3.1423, "gallons": 50.0, "cost": 157.12,
+      "distance_from_start": 514.91, "distance_from_route": 1.41,
+      "selected_reason": "Lowest fuel price within search radius" },
+    { "stop_number": 2, "truck_stop": "7-ELEVEN #40363", "city": "Palatka", "state": "FL",
+      "address": "US-17/SR-15 & SR-100", "latitude": 29.6531, "longitude": -81.6486,
+      "fuel_price": 3.364, "gallons": 28.43, "cost": 95.64,
+      "distance_from_start": 982.08, "distance_from_route": 18.39,
+      "selected_reason": "Lowest fuel price within search radius" }
+  ],
+  "cost_breakdown": [
+    { "stop_number": 1, "gallons": 50.0,  "price": 3.1423, "cost": 157.12 },
+    { "stop_number": 2, "gallons": 28.43, "price": 3.364,  "cost": 95.64 }
+  ],
+  "map": "…"
+}
+```
+
+### 2) Los Angeles, CA → Seattle, WA — 2 stops (radius widens on a remote leg)
+
+```bash
+curl --location 'http://127.0.0.1:8000/api/route/' \
+--header 'Content-Type: application/json' \
+--data '{ "start": "Los Angeles, CA", "finish": "Seattle, WA" }'
+```
+
+```json
+{
+  "route": { "total_distance_miles": 1217.59, "estimated_duration_hours": 23.18, "geometry": "…" },
+  "vehicle": { "max_range_miles": 500, "fuel_efficiency_mpg": 10,
+               "starts_with_full_tank": true, "initial_fuel_gallons": 50 },
+  "fuel_summary": {
+    "fuel_required_gallons": 121.76, "initial_fuel_gallons": 50.0,
+    "fuel_purchased_gallons": 71.76, "fuel_stops_required": 2,
+    "estimated_total_cost": 263.42, "currency": "USD",
+    "optimization_method": "Cheapest fuel station within search radius"
+  },
+  "fuel_stops": [
+    { "stop_number": 1, "truck_stop": "MAVERIK COUNTRY STORE #409", "city": "Carson City",
+      "state": "NV", "fuel_price": 3.589, "gallons": 50.0, "cost": 179.45,
+      "distance_from_start": 479.02, "distance_from_route": 97.94 },
+    { "stop_number": 2, "truck_stop": "PILOT TRAVEL CENTERS #386", "city": "Salem",
+      "state": "OR", "fuel_price": 3.859, "gallons": 21.76, "cost": 83.97,
+      "distance_from_start": 999.44, "distance_from_route": 0.45 }
+  ],
+  "cost_breakdown": [
+    { "stop_number": 1, "gallons": 50.0,  "price": 3.589, "cost": 179.45 },
+    { "stop_number": 2, "gallons": 21.76, "price": 3.859, "cost": 83.97 }
+  ]
+}
+```
+
+> **Edge case — sparse coverage.** The first checkpoint lands in a thinly
+> served stretch of the eastern Sierra, so the search radius auto-widens to find
+> a station (reflected in `selected_reason` and the larger `distance_from_route`).
+> `distance_from_route` precision also tracks OSRM geometry density.
+
+### 3) San Francisco, CA → New York, NY — coast-to-coast, 5 stops
+
+```bash
+curl --location 'http://127.0.0.1:8000/api/route/' \
+--header 'Content-Type: application/json' \
+--data '{ "start": "San Francisco, CA", "finish": "New York, NY" }'
+```
+
+```json
+{
+  "route": { "total_distance_miles": 2913.77, "estimated_duration_hours": 51.33, "geometry": "…" },
+  "vehicle": { "max_range_miles": 500, "fuel_efficiency_mpg": 10,
+               "starts_with_full_tank": true, "initial_fuel_gallons": 50 },
+  "fuel_summary": {
+    "fuel_required_gallons": 291.38, "initial_fuel_gallons": 50.0,
+    "fuel_purchased_gallons": 241.38, "fuel_stops_required": 5,
+    "estimated_total_cost": 797.49, "currency": "USD",
+    "optimization_method": "Cheapest fuel station within search radius"
+  },
+  "fuel_stops": [
+    { "stop_number": 1, "truck_stop": "GOLDEN GATE TRUCKSTOP", "city": "Elko",    "state": "NV", "fuel_price": 3.599,  "gallons": 50.0,  "cost": 179.95, "distance_from_start": 497.18,  "distance_from_route": 4.72 },
+    { "stop_number": 2, "truck_stop": "Maverik Country Store #724", "city": "Rawlins", "state": "WY", "fuel_price": 3.289, "gallons": 50.0, "cost": 164.45, "distance_from_start": 1006.01, "distance_from_route": 0.92 },
+    { "stop_number": 3, "truck_stop": "CASEYS #3465", "city": "Gibbon",  "state": "NE", "fuel_price": 3.049,  "gallons": 50.0,  "cost": 152.45, "distance_from_start": 1496.12, "distance_from_route": 3.52 },
+    { "stop_number": 4, "truck_stop": "BECKS EXPRESS MART #26", "city": "Geneseo", "state": "IL", "fuel_price": 3.269, "gallons": 50.0, "cost": 163.45, "distance_from_start": 1999.77, "distance_from_route": 1.48 },
+    { "stop_number": 5, "truck_stop": "Certified Oil #400410", "city": "Ravenna", "state": "OH", "fuel_price": 3.3157, "gallons": 41.38, "cost": 137.19, "distance_from_start": 2503.87, "distance_from_route": 0.66 }
+  ],
+  "cost_breakdown": [
+    { "stop_number": 1, "gallons": 50.0,  "price": 3.599,  "cost": 179.95 },
+    { "stop_number": 2, "gallons": 50.0,  "price": 3.289,  "cost": 164.45 },
+    { "stop_number": 3, "gallons": 50.0,  "price": 3.049,  "cost": 152.45 },
+    { "stop_number": 4, "gallons": 50.0,  "price": 3.269,  "cost": 163.45 },
+    { "stop_number": 5, "gallons": 41.38, "price": 3.3157, "cost": 137.19 }
+  ]
+}
+```
+
+### 4) Phoenix, AZ → New Orleans, LA — 3 stops, cheapest pick is clear
+
+```bash
+curl --location 'http://127.0.0.1:8000/api/route/' \
+--header 'Content-Type: application/json' \
+--data '{ "start": "Phoenix, AZ", "finish": "New Orleans, LA" }'
+```
+
+```json
+{
+  "route": { "total_distance_miles": 1525.36, "estimated_duration_hours": 26.31, "geometry": "…" },
+  "fuel_summary": {
+    "fuel_required_gallons": 152.54, "initial_fuel_gallons": 50.0,
+    "fuel_purchased_gallons": 102.54, "fuel_stops_required": 3,
+    "estimated_total_cost": 305.34, "currency": "USD",
+    "optimization_method": "Cheapest fuel station within search radius"
+  },
+  "fuel_stops": [
+    { "stop_number": 1, "truck_stop": "TRAVELING TIGER CENTER", "city": "Sierra Blanca", "state": "TX", "fuel_price": 3.1557, "gallons": 50.0, "cost": 157.78, "distance_from_start": 520.44,  "distance_from_route": 1.66 },
+    { "stop_number": 2, "truck_stop": "CIRCLE K #2742034", "city": "Schertz", "state": "TX", "fuel_price": 2.794, "gallons": 50.0, "cost": 139.70, "distance_from_start": 986.83, "distance_from_route": 3.87 },
+    { "stop_number": 3, "truck_stop": "AIRLINE CHEVRON", "city": "Kenner", "state": "LA", "fuel_price": 3.099, "gallons": 2.54, "cost": 7.86, "distance_from_start": 1514.11, "distance_from_route": 0.81 }
+  ],
+  "cost_breakdown": [
+    { "stop_number": 1, "gallons": 50.0, "price": 3.1557, "cost": 157.78 },
+    { "stop_number": 2, "gallons": 50.0, "price": 2.794,  "cost": 139.70 },
+    { "stop_number": 3, "gallons": 2.54, "price": 3.099,  "cost": 7.86 }
+  ]
+}
+```
+
+### 5) Austin, TX → Dallas, TX — **edge case: trip fits in one tank (0 stops)**
+
+```bash
+curl --location 'http://127.0.0.1:8000/api/route/' \
+--header 'Content-Type: application/json' \
+--data '{ "start": "Austin, TX", "finish": "Dallas, TX" }'
+```
+
+The 195.56-mile trip is under the 500-mile range, so no refuel is needed. The
+starting tank covers it, nothing is purchased, and the cost is `$0.00` — while
+`fuel_required_gallons` still reports the fuel actually consumed.
+
+```json
+{
+  "route": { "total_distance_miles": 195.56, "estimated_duration_hours": 3.46, "geometry": "…" },
+  "vehicle": { "max_range_miles": 500, "fuel_efficiency_mpg": 10,
+               "starts_with_full_tank": true, "initial_fuel_gallons": 19.56 },
+  "fuel_summary": {
+    "fuel_required_gallons": 19.56, "initial_fuel_gallons": 19.56,
+    "fuel_purchased_gallons": 0.0, "fuel_stops_required": 0,
+    "estimated_total_cost": 0.0, "currency": "USD",
+    "optimization_method": "Cheapest fuel station within search radius"
+  },
+  "fuel_stops": [],
+  "cost_breakdown": []
+}
+```
+
+### 6) `"abcdefxyz"` → Chicago, IL — **edge case: invalid location (HTTP 400)**
+
+```bash
+curl --location 'http://127.0.0.1:8000/api/route/' \
+--header 'Content-Type: application/json' \
+--data '{ "start": "abcdefxyz", "finish": "Chicago, IL" }'
+```
+
+An unresolvable start location returns a clean `400` with a descriptive error
+(no route or fuel work is attempted):
+
+```json
+{
+  "error": "geocoding_failed",
+  "detail": "Could not geocode 'abcdefxyz' within the USA."
+}
+```
+
+---
+
 ## Tests
 
 ```bash

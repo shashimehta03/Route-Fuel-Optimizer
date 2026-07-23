@@ -79,6 +79,27 @@ class OptimizerSelectionTests(TestCase):
         "MAX_SEARCH_RADIUS_MILES": 60, "OSRM_BASE_URL": "", "NOMINATIM_BASE_URL": "",
         "HTTP_TIMEOUT_SECONDS": 5, "USER_AGENT": "t",
     })
+    def test_every_checkpoint_yields_a_stop_even_with_no_nearby_station(self):
+        # Regression: a checkpoint with no station inside the max radius must
+        # still produce a stop (nearest-station fallback), so no 500-mile leg
+        # goes unfuelled and the accounting stays consistent.
+        route = _straight_route()                 # ~1273 mi -> checkpoints 500, 1000
+        # Only one station, hundreds of miles from every checkpoint.
+        self._station("Lonely", 40.0, -76.0, 3.00)   # near the very end
+        stations.reset_cache()
+
+        stops = optimize_fuel_stops(route)
+        # Two checkpoints (500, 1000) -> two stops, numbered 1 and 2.
+        self.assertEqual([s.stop_number for s in stops], [1, 2])
+        self.assertTrue(any("Nearest available station" in s.selected_reason
+                            for s in stops))
+
+    @override_settings(FUEL_ROUTE={
+        "VEHICLE_RANGE_MILES": 500, "MILES_PER_GALLON": 10,
+        "CORRIDOR_MILES": 5, "SEARCH_RADIUS_MILES": 15,
+        "MAX_SEARCH_RADIUS_MILES": 60, "OSRM_BASE_URL": "", "NOMINATIM_BASE_URL": "",
+        "HTTP_TIMEOUT_SECONDS": 5, "USER_AGENT": "t",
+    })
     def test_tie_breaks_on_distance_from_route(self):
         route = _straight_route()
         cp_lon = -100.0 + 500 / 53.06

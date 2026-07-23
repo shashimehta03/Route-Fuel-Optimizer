@@ -105,8 +105,14 @@ def optimize_fuel_stops(route: Route) -> list[FuelStop]:
         while candidates.size == 0 and used_radius < max_radius:
             used_radius = min(used_radius * 2, max_radius)
             candidates = np.nonzero(cp_dist <= used_radius)[0]
-        if candidates.size == 0:
-            continue  # no station anywhere near this checkpoint
+
+        # If still nothing within the max radius, fall back to the single
+        # nearest station. Every checkpoint MUST yield a stop, otherwise a
+        # 500-mile leg would go unfuelled and the trip's fuel accounting
+        # (initial + purchased == required) would break.
+        used_fallback = candidates.size == 0
+        if used_fallback:
+            candidates = np.array([int(np.argmin(cp_dist))])
 
         # Cheapest price; tie -> closest to the route line.
         cand_prices = store.prices[candidates]
@@ -128,7 +134,12 @@ def optimize_fuel_stops(route: Route) -> list[FuelStop]:
                 best_mile = mile_along
 
         reason = "Lowest fuel price within search radius"
-        if used_radius > radius:
+        if used_fallback:
+            reason = (
+                "Nearest available station (no station within the "
+                f"{max_radius:.0f}-mile search radius)"
+            )
+        elif used_radius > radius:
             reason = (
                 f"Lowest fuel price within widened {used_radius:.0f}-mile radius "
                 "(no station inside the default radius)"
