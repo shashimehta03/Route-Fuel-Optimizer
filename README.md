@@ -175,9 +175,12 @@ curl -X POST http://127.0.0.1:8000/api/route/ \
   },
   "fuel_summary": {
     "fuel_required_gallons": 100.6,
+    "initial_fuel_gallons": 50.0,
     "fuel_purchased_gallons": 50.6,
     "fuel_stops_required": 2,
-    "estimated_total_cost": 156.77
+    "estimated_total_cost": 156.77,
+    "currency": "USD",
+    "optimization_method": "Cheapest fuel station within search radius"
   },
   "fuel_stops": [
     {

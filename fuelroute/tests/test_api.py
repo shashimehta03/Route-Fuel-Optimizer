@@ -71,9 +71,13 @@ class RouteApiContractTests(TestCase):
         self.assertIs(body["vehicle"]["starts_with_full_tank"], True)
         self.assertEqual(body["vehicle"]["initial_fuel_gallons"], 50.0)
         fs = body["fuel_summary"]
-        for key in ("fuel_required_gallons", "fuel_purchased_gallons",
-                    "fuel_stops_required", "estimated_total_cost"):
+        for key in ("fuel_required_gallons", "initial_fuel_gallons",
+                    "fuel_purchased_gallons", "fuel_stops_required",
+                    "estimated_total_cost", "currency", "optimization_method"):
             self.assertIn(key, fs)
+        self.assertEqual(fs["currency"], "USD")
+        self.assertEqual(fs["initial_fuel_gallons"],
+                         body["vehicle"]["initial_fuel_gallons"])
 
         # Accounting identity: initial + purchased == required.
         self.assertAlmostEqual(

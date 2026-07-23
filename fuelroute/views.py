@@ -20,6 +20,15 @@ from .services.fuel_optimizer import FuelStop
 from .services.geocoding import GeocodingError
 
 
+def _num(value: float):
+    """Present a whole-number float as an int (500.0 -> 500), else round to 2dp.
+
+    Keeps numeric output clean and consistent without changing types elsewhere.
+    """
+    rounded = round(float(value), 2)
+    return int(rounded) if rounded == int(rounded) else rounded
+
+
 def _fuel_stops_payload(stops: list[FuelStop], costing) -> list[dict]:
     out = []
     for s in stops:
@@ -96,16 +105,19 @@ def _build_response(result: route_service.RouteResult, request: Request) -> dict
         },
         # --- new: fuel optimization + cost -------------------------------
         "vehicle": {
-            "max_range_miles": cfg["VEHICLE_RANGE_MILES"],
-            "fuel_efficiency_mpg": cfg["MILES_PER_GALLON"],
+            "max_range_miles": _num(cfg["VEHICLE_RANGE_MILES"]),
+            "fuel_efficiency_mpg": _num(cfg["MILES_PER_GALLON"]),
             "starts_with_full_tank": True,
-            "initial_fuel_gallons": costing.initial_fuel_gallons,
+            "initial_fuel_gallons": _num(costing.initial_fuel_gallons),
         },
         "fuel_summary": {
             "fuel_required_gallons": costing.fuel_required_gallons,
+            "initial_fuel_gallons": costing.initial_fuel_gallons,
             "fuel_purchased_gallons": costing.fuel_purchased_gallons,
             "fuel_stops_required": costing.fuel_stops_required,
             "estimated_total_cost": costing.estimated_total_cost,
+            "currency": "USD",
+            "optimization_method": "Cheapest fuel station within search radius",
         },
         "fuel_stops": _fuel_stops_payload(stops, costing),
         "cost_breakdown": [
