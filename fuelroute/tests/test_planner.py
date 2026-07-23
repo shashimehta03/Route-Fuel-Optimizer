@@ -118,6 +118,20 @@ class CostServiceTests(TestCase):
         self.assertEqual(costing.cost_breakdown[1].cost, 63.8)
         self.assertEqual(costing.estimated_total_cost, 156.0 + 63.8)
 
+        # Explicit accounting: 50-gal starting tank + 70 gal purchased = 120.
+        self.assertEqual(costing.fuel_purchased_gallons, 70.0)
+        self.assertEqual(costing.initial_fuel_gallons, 50.0)
+        self.assertAlmostEqual(
+            costing.initial_fuel_gallons + costing.fuel_purchased_gallons,
+            costing.fuel_required_gallons, places=6)
+        # Cost matches the gallons actually purchased.
+        self.assertAlmostEqual(
+            sum(c.cost for c in costing.cost_breakdown),
+            costing.estimated_total_cost, places=6)
+        self.assertAlmostEqual(
+            sum(c.gallons for c in costing.cost_breakdown),
+            costing.fuel_purchased_gallons, places=6)
+
     @override_settings(FUEL_ROUTE={
         "VEHICLE_RANGE_MILES": 500, "MILES_PER_GALLON": 10,
         "CORRIDOR_MILES": 5, "SEARCH_RADIUS_MILES": 15,
@@ -129,3 +143,9 @@ class CostServiceTests(TestCase):
         self.assertEqual(costing.fuel_stops_required, 0)
         self.assertEqual(costing.estimated_total_cost, 0.0)
         self.assertEqual(costing.fuel_required_gallons, 40.0)
+        # Nothing purchased; the 40 gal all came from the starting tank.
+        self.assertEqual(costing.fuel_purchased_gallons, 0.0)
+        self.assertEqual(costing.initial_fuel_gallons, 40.0)
+        self.assertAlmostEqual(
+            costing.initial_fuel_gallons + costing.fuel_purchased_gallons,
+            costing.fuel_required_gallons, places=6)

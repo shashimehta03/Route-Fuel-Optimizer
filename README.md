@@ -82,14 +82,28 @@ any point on the route — no additional calls.
 If no station falls inside the default radius, the search widens (up to a
 configurable cap) so a stop is still produced, and `selected_reason` says so.
 
-### Fuel cost (`fuel_cost_service.py`)
+### Fuel cost & accounting (`fuel_cost_service.py`)
 
 * `fuel_required_gallons = total_distance / 10` — the whole trip's consumption.
-* The vehicle departs on a full tank (first 500 miles), then at each checkpoint
-  buys fuel for the **next** leg: `gallons = min(500, distance_remaining) / 10`
-  — a full 50-gallon tank on a full leg, or a partial fill on the final short
-  leg.
+* The vehicle **starts with a full tank** (`initial_fuel_gallons`, 50 gal),
+  which covers the opening miles for free.
+* At each checkpoint it buys fuel for the **next** leg:
+  `gallons = min(500, distance_remaining) / 10` — a full 50-gallon tank on a
+  full leg, or a partial fill on the final short leg. Their sum is
+  `fuel_purchased_gallons`.
 * `estimated_total_cost = Σ (gallons × price)` across the stops.
+
+The accounting is consistent by construction:
+
+```
+initial_fuel_gallons + fuel_purchased_gallons == fuel_required_gallons
+Σ cost_breakdown.gallons == fuel_purchased_gallons
+Σ cost_breakdown.cost    == estimated_total_cost
+```
+
+`initial_fuel_gallons` is derived as `fuel_required − fuel_purchased`, so the
+first identity always holds (it is the full 50-gal tank on any multi-tank trip,
+and the smaller amount actually drawn on a single-tank trip).
 
 ### Feasibility note
 
@@ -155,10 +169,13 @@ curl -X POST http://127.0.0.1:8000/api/route/ \
   },
   "vehicle": {
     "max_range_miles": 500,
-    "fuel_efficiency_mpg": 10
+    "fuel_efficiency_mpg": 10,
+    "starts_with_full_tank": true,
+    "initial_fuel_gallons": 50
   },
   "fuel_summary": {
     "fuel_required_gallons": 100.6,
+    "fuel_purchased_gallons": 50.6,
     "fuel_stops_required": 2,
     "estimated_total_cost": 156.77
   },
@@ -193,10 +210,13 @@ curl -X POST http://127.0.0.1:8000/api/route/ \
 }
 ```
 
+> **Fuel accounting.** `initial_fuel_gallons` (the full starting tank) +
+> `fuel_purchased_gallons` = `fuel_required_gallons` exactly
+> (50 + 50.6 = 100.6). The purchased total equals the sum of the
+> `cost_breakdown` gallons, and `estimated_total_cost` equals the sum of the
+> `cost_breakdown` costs — so the trip is priced on exactly what is bought.
 > The second stop buys only 0.6 gal because its 500-mile checkpoint (mile 1000)
 > lands ~6 miles from the destination, so the final leg needs almost no fuel.
-> `fuel_required_gallons` (100.6) is the whole trip's consumption; the departure
-> tank covers the first 500 miles, so purchased gallons sum to less than that.
 
 ### `GET /api/route/map/?start=…&finish=…`
 

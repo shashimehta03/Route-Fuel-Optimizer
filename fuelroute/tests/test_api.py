@@ -66,12 +66,26 @@ class RouteApiContractTests(TestCase):
         self.assertEqual(body["route"]["geometry"]["type"], "LineString")
 
         # New sections.
-        self.assertEqual(body["vehicle"],
-                         {"max_range_miles": 500, "fuel_efficiency_mpg": 10})
+        self.assertEqual(body["vehicle"]["max_range_miles"], 500)
+        self.assertEqual(body["vehicle"]["fuel_efficiency_mpg"], 10)
+        self.assertIs(body["vehicle"]["starts_with_full_tank"], True)
+        self.assertEqual(body["vehicle"]["initial_fuel_gallons"], 50.0)
         fs = body["fuel_summary"]
-        self.assertIn("fuel_required_gallons", fs)
-        self.assertIn("fuel_stops_required", fs)
-        self.assertIn("estimated_total_cost", fs)
+        for key in ("fuel_required_gallons", "fuel_purchased_gallons",
+                    "fuel_stops_required", "estimated_total_cost"):
+            self.assertIn(key, fs)
+
+        # Accounting identity: initial + purchased == required.
+        self.assertAlmostEqual(
+            body["vehicle"]["initial_fuel_gallons"] + fs["fuel_purchased_gallons"],
+            fs["fuel_required_gallons"], places=2)
+        # Cost matches the gallons actually purchased.
+        self.assertAlmostEqual(
+            sum(c["cost"] for c in body["cost_breakdown"]),
+            fs["estimated_total_cost"], places=2)
+        self.assertAlmostEqual(
+            sum(c["gallons"] for c in body["cost_breakdown"]),
+            fs["fuel_purchased_gallons"], places=2)
 
         # A ~1273-mile route needs stops at 500 and 1000 -> 2 stops.
         self.assertEqual(fs["fuel_stops_required"], 2)

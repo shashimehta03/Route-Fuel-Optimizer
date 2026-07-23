@@ -98,9 +98,12 @@ def _build_response(result: route_service.RouteResult, request: Request) -> dict
         "vehicle": {
             "max_range_miles": cfg["VEHICLE_RANGE_MILES"],
             "fuel_efficiency_mpg": cfg["MILES_PER_GALLON"],
+            "starts_with_full_tank": True,
+            "initial_fuel_gallons": costing.initial_fuel_gallons,
         },
         "fuel_summary": {
             "fuel_required_gallons": costing.fuel_required_gallons,
+            "fuel_purchased_gallons": costing.fuel_purchased_gallons,
             "fuel_stops_required": costing.fuel_stops_required,
             "estimated_total_cost": costing.estimated_total_cost,
         },
