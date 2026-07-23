@@ -456,8 +456,22 @@ to fire exactly once, so tests need no network).
 All knobs live in `settings.FUEL_ROUTE` and can be overridden via environment
 variables: `VEHICLE_RANGE_MILES`, `MILES_PER_GALLON`, `SEARCH_RADIUS_MILES`
 (checkpoint search radius, 10–20), `MAX_SEARCH_RADIUS_MILES` (widen cap),
-`CORRIDOR_MILES`, `OSRM_BASE_URL`, `NOMINATIM_BASE_URL`, `HTTP_TIMEOUT_SECONDS`.
-The SQLite path can be overridden with `DJANGO_DB_PATH`.
+`CORRIDOR_MILES`, `OSRM_BASE_URL`, `NOMINATIM_BASE_URL`, `HTTP_TIMEOUT_SECONDS`,
+plus Django's `DJANGO_SECRET_KEY`, `DJANGO_DEBUG`, `DJANGO_ALLOWED_HOSTS`, and
+the SQLite path `DJANGO_DB_PATH`.
+
+### `.env` support
+
+A local `.env` file is loaded automatically at startup (via `python-dotenv`).
+Copy the template and edit as needed:
+
+```bash
+cp .env.example .env
+```
+
+`.env` is git-ignored; `.env.example` is committed as the reference. Every
+variable has a working default in `settings.py`, so a `.env` is optional — the
+project runs with zero configuration.
 
 ---
 

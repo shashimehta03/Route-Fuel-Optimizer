@@ -9,6 +9,17 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# --- Environment ----------------------------------------------------------
+# Optionally load a local ``.env`` file (never committed — see .gitignore).
+# Guarded so the project still runs if python-dotenv isn't installed and works
+# fine when the vars are supplied by the real environment instead.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(BASE_DIR / ".env")
+except ImportError:
+    pass
+
 # --- Security -------------------------------------------------------------
 # For a take-home / local demo we read from the environment but fall back to
 # safe local defaults so the project runs with zero configuration.
