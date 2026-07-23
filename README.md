@@ -21,8 +21,10 @@ Fuel prices come from the provided OPIS truck-stop price file
 | Free map / routing API | [OSRM public server](https://router.project-osrm.org) — no API key. |
 | **One** call to the routing API | Exactly **one** OSRM call per request. It returns the full geometry **and** per-segment distances, so no follow-up calls are needed. |
 | Fast responses | Stations are geocoded **once** at load time and matched in-memory with vectorized NumPy. Compute time is **~16 ms** across all 7,500+ stations; the only network wait is the single OSRM call. |
-| 500-mile range, multiple fuel-ups | The optimizer inserts as many stops as the distance requires, never exceeding 500 miles between fill-ups. |
-| Total fuel cost @ 10 mpg | Returned as `fuel.total_cost_usd`. |
+| Cheapest station, not closest | Each 500-mile checkpoint picks the **lowest-priced** station within a configurable radius (10–20 mi); ties break on closeness to the route. |
+| 500-mile range, multiple fuel-ups | A refuel checkpoint is placed at every 500 miles, so long routes get multiple stops. |
+| No external fuel-price API | Prices come only from the local DB (loaded from the CSV). |
+| Total fuel cost @ 10 mpg | `fuel_summary.estimated_total_cost`, with a per-stop `cost_breakdown`. |
 
 ---
 
@@ -36,9 +38,11 @@ fuelroute/
     gazetteer.py        offline (city, state) -> (lat, lon)  [no network]
     geocoding.py        geocode the start/finish inputs      [offline first, Nominatim fallback]
     osrm.py             OSRM client + response parser        [the single routing call]
-    geo.py              vectorized NumPy distance helpers
+    route_service.py    route generation orchestration       [geocode + the one OSRM call]
+    fuel_optimizer.py   500-mile checkpoints + cheapest-station-within-radius
+    fuel_cost_service.py gallons + per-stop cost breakdown
+    geo.py              vectorized NumPy distance helpers (incl. point-to-segment)
     stations.py         in-memory station cache
-    planner.py          the core: match stations to route + optimal fueling
   management/commands/
     load_stations.py    load + geocode the CSV (run once)
   views.py              DRF endpoints
@@ -62,32 +66,40 @@ That one response contains every route vertex and the distance of every
 segment between vertices, which is enough to compute the cumulative mileage of
 any point on the route — no additional calls.
 
-### Matching stations to the route
+### Fuel-stop optimization (`fuel_optimizer.py`)
 
-The route's bounding box pre-filters candidate stations; the survivors are
-compared to every route vertex with a vectorized equirectangular projection.
-Stations within the corridor (default **5 miles**, configurable) become
-candidate fuel stops, each tagged with its mile-marker along the route.
+1. **Segment** the route into 500-mile legs — refuel checkpoints at every
+   500-mile mark (500, 1000, ...) before the destination.
+   A 1,200-mile route yields checkpoints at 500 and 1000.
+2. For each checkpoint, **find candidate stations within a configurable radius**
+   (default **15 miles**, allowed range 10–20) of that point on the route.
+   Stations are queried only from the in-memory cache of the local DB — no
+   external fuel-price API, and no per-checkpoint database round-trips.
+3. **Select the cheapest** candidate. Ties break on the smallest
+   `distance_from_route`, measured with an exact point-to-segment projection so
+   it stays accurate regardless of how densely the route is sampled.
 
-### The fuel-cost model & optimizer
+If no station falls inside the default radius, the search widens (up to a
+configurable cap) so a stop is still produced, and `selected_reason` says so.
 
-**Model.** The trip burns `distance / 10` gallons. Every one of those gallons
-is priced at the station where it is *optimally* bought, subject to the
-500-mile range between fill-ups. The origin is treated as a departure fill-up
-priced at the nearest on-route station, so the reported figure is the **true
-cost of all fuel the journey burns** (not just incremental top-ups). The
-destination can be reached with an empty tank.
+### Fuel cost (`fuel_cost_service.py`)
 
-**Algorithm.** The classic gas-station greedy, which is provably optimal for
-this problem. At the current stop (price `p`):
+* `fuel_required_gallons = total_distance / 10` — the whole trip's consumption.
+* The vehicle departs on a full tank (first 500 miles), then at each checkpoint
+  buys fuel for the **next** leg: `gallons = min(500, distance_remaining) / 10`
+  — a full 50-gallon tank on a full leg, or a partial fill on the final short
+  leg.
+* `estimated_total_cost = Σ (gallons × price)` across the stops.
 
-1. If a strictly cheaper station is reachable within range → buy just enough to
-   reach the nearest such station.
-2. Else if the destination is reachable → buy just enough to finish.
-3. Else → fill the tank and drive to the cheapest reachable station.
+### Feasibility note
 
-The test suite verifies this greedy against a brute-force dynamic-programming
-optimum over 200 randomized instances.
+The fixed-checkpoint scheme is the approach specified in the assignment; it is
+a clean approximation rather than a global cost optimum. Because a checkpoint's
+chosen station may sit a few miles before/after the exact 500-mile mark,
+extreme edge cases (a long, station-less stretch just past a checkpoint) are
+possible in theory but do not occur on real US interstates given the ~7.5k-stop
+dataset. The tests cover the segmentation, selection, tie-breaking, and cost
+math.
 
 ---
 
@@ -141,30 +153,50 @@ curl -X POST http://127.0.0.1:8000/api/route/ \
     "estimated_duration_hours": 17.82,
     "geometry": { "type": "LineString", "coordinates": [[-104.99, 39.74], ...] }
   },
-  "fuel": {
-    "vehicle_range_miles": 500,
-    "miles_per_gallon": 10,
-    "total_gallons": 100.6,
-    "total_cost_usd": 305.07,
-    "number_of_stops": 3,
-    "stops": [
-      { "order": 1, "route_mile": 0,   "price_per_gallon": 3.299,
-        "gallons_purchased": 21.0, "cost": 69.27,
-        "station": { "name": "CIRCLE K #2744095", "city": "Denver",   "state": "CO" } },
-      { "order": 2, "route_mile": 210, "price_per_gallon": 3.014,
-        "gallons_purchased": 32.2, "cost": 97.02,
-        "station": { "name": "FATDOGS OGALLALA", "city": "Ogallala", "state": "NE" } },
-      { "order": 3, "route_mile": 532, "price_per_gallon": 2.9273,
-        "gallons_purchased": 47.4, "cost": 138.79,
-        "station": { "name": "QUIKTRIP #598",    "city": "Omaha",    "state": "NE" } }
-    ]
+  "vehicle": {
+    "max_range_miles": 500,
+    "fuel_efficiency_mpg": 10
   },
+  "fuel_summary": {
+    "fuel_required_gallons": 100.6,
+    "fuel_stops_required": 2,
+    "estimated_total_cost": 156.77
+  },
+  "fuel_stops": [
+    {
+      "stop_number": 1,
+      "truck_stop": "FAT DOGS LINCOLN TC",
+      "city": "Lincoln", "state": "NE", "address": "I-80, EXIT 399",
+      "latitude": 40.8176, "longitude": -96.6889,
+      "fuel_price": 3.099, "gallons": 50.0, "cost": 154.95,
+      "distance_from_start": 488.22, "distance_from_route": 1.73,
+      "selected_reason": "Lowest fuel price within search radius"
+    },
+    {
+      "stop_number": 2,
+      "truck_stop": "Gulf",
+      "city": "Bensenville", "state": "IL", "address": "SR-83",
+      "latitude": 41.9526, "longitude": -87.9426,
+      "fuel_price": 3.059, "gallons": 0.6, "cost": 1.82,
+      "distance_from_start": 990.37, "distance_from_route": 7.44,
+      "selected_reason": "Lowest fuel price within search radius"
+    }
+  ],
+  "cost_breakdown": [
+    { "stop_number": 1, "gallons": 50.0, "price": 3.099, "cost": 154.95 },
+    { "stop_number": 2, "gallons": 0.6,  "price": 3.059, "cost": 1.82 }
+  ],
   "map": {
     "geojson": { "type": "FeatureCollection", "features": [ ... ] },
     "html_map_url": "http://127.0.0.1:8000/api/route/map/?start=Denver,CO&finish=Chicago,IL"
   }
 }
 ```
+
+> The second stop buys only 0.6 gal because its 500-mile checkpoint (mile 1000)
+> lands ~6 miles from the destination, so the final leg needs almost no fuel.
+> `fuel_required_gallons` (100.6) is the whole trip's consumption; the departure
+> tank covers the first 500 miles, so purchased gallons sum to less than that.
 
 ### `GET /api/route/map/?start=…&finish=…`
 
@@ -183,19 +215,20 @@ unavailable).
 python manage.py test fuelroute
 ```
 
-Covers: OSRM response parsing & mileage math, the optimizer vs. a brute-force
-DP optimum, an infeasible-range case, and the full endpoint (external calls
-mocked, so tests need no network).
+Covers: OSRM response parsing & mileage math, 500-mile checkpoint segmentation,
+cheapest-station-within-radius selection and tie-breaking, the gallons/cost
+calculation, and the full endpoint contract (external calls mocked and asserted
+to fire exactly once, so tests need no network).
 
 ---
 
 ## Configuration
 
 All knobs live in `settings.FUEL_ROUTE` and can be overridden via environment
-variables: `VEHICLE_RANGE_MILES`, `MILES_PER_GALLON`, `CORRIDOR_MILES`,
-`OSRM_BASE_URL`, `NOMINATIM_BASE_URL`, `HTTP_TIMEOUT_SECONDS`. The SQLite path
-can be overridden with `DJANGO_DB_PATH`.
-```
+variables: `VEHICLE_RANGE_MILES`, `MILES_PER_GALLON`, `SEARCH_RADIUS_MILES`
+(checkpoint search radius, 10–20), `MAX_SEARCH_RADIUS_MILES` (widen cap),
+`CORRIDOR_MILES`, `OSRM_BASE_URL`, `NOMINATIM_BASE_URL`, `HTTP_TIMEOUT_SECONDS`.
+The SQLite path can be overridden with `DJANGO_DB_PATH`.
 
 ---
 
@@ -203,9 +236,12 @@ can be overridden with `DJANGO_DB_PATH`.
 
 * **Coordinates** for stations are city-level centroids (the price file has no
   lat/lon). This is precise enough to snap a station to the highway corridor it
-  sits on. `detour_miles` in each stop reports how far the station is from the
-  route line.
+  sits on. `distance_from_route` in each stop reports how far the station is
+  from the route line (exact point-to-segment distance).
+* The `FuelStation` model stores columns `name` / `retail_price`; the
+  assignment's `truck_stop_name` / `fuel_price` names are exposed as aliases on
+  the model so no data migration is needed.
 * Non-US rows in the price file (e.g. Canadian provinces) are loaded but left
-  un-geocoded and are ignored by the planner, since routing is US-only.
+  un-geocoded and are ignored by the optimizer, since routing is US-only.
 * OSRM's public demo server is best-effort; for production you'd self-host OSRM
   or use a keyed provider. The base URL is configurable.

@@ -104,6 +104,12 @@ FUEL_ROUTE = {
     # How far (miles) a station may sit from the route to still count as an
     # "on-route" fuel stop.
     "CORRIDOR_MILES": float(os.environ.get("CORRIDOR_MILES", 5)),
+    # Search radius (miles) around each 500-mile refuel checkpoint when looking
+    # for candidate stations. Assignment allows 10-20; default 15.
+    "SEARCH_RADIUS_MILES": float(os.environ.get("SEARCH_RADIUS_MILES", 15)),
+    # If no station falls within SEARCH_RADIUS_MILES of a checkpoint, widen the
+    # search up to this cap so a stop can still be produced.
+    "MAX_SEARCH_RADIUS_MILES": float(os.environ.get("MAX_SEARCH_RADIUS_MILES", 60)),
     # Free routing provider. OSRM public demo server needs no API key and
     # returns the full geometry + per-segment distances in a single call.
     "OSRM_BASE_URL": os.environ.get(

@@ -28,5 +28,25 @@ class FuelStation(models.Model):
             models.Index(fields=["latitude", "longitude"]),
         ]
 
+    # --- Assignment-spec field aliases ------------------------------------
+    # The assignment names these fields ``truck_stop_name`` and ``fuel_price``.
+    # They are exposed as read/write aliases over the underlying columns so the
+    # spec's vocabulary works everywhere without a data migration.
+    @property
+    def truck_stop_name(self) -> str:
+        return self.name
+
+    @truck_stop_name.setter
+    def truck_stop_name(self, value):
+        self.name = value
+
+    @property
+    def fuel_price(self):
+        return self.retail_price
+
+    @fuel_price.setter
+    def fuel_price(self, value):
+        self.retail_price = value
+
     def __str__(self):
         return f"{self.name} ({self.city}, {self.state}) @ ${self.retail_price}"

@@ -1,158 +1,131 @@
-import math
-import random
-from unittest import mock
-
-from django.test import TestCase
+"""Tests for the fuel optimizer (checkpoints + station selection) and the
+fuel cost service."""
+from django.test import TestCase, override_settings
 
 from fuelroute.models import FuelStation
-from fuelroute.services import geocoding, osrm, planner, stations
-from fuelroute.services.planner import FuelPoint, _optimize
+from fuelroute.services import fuel_cost_service, fuel_optimizer, stations
+from fuelroute.services.fuel_optimizer import (
+    FuelStop, optimize_fuel_stops, point_at_mile, refuel_checkpoints,
+)
+from fuelroute.services.osrm import Route
 
 
-def _fp(mile, price, is_origin=False, is_destination=False):
-    station = None if is_destination else {
-        "name": f"S@{mile}", "address": "", "city": "X", "state": "XX",
-        "opis_id": 0, "price": price, "latitude": 40.0, "longitude": -100.0,
-    }
-    return FuelPoint(route_mile=float(mile), price=price, station=station,
-                     is_origin=is_origin, is_destination=is_destination)
+class CheckpointTests(TestCase):
+    def test_checkpoints_every_500_miles(self):
+        self.assertEqual(refuel_checkpoints(1200, 500), [500, 1000])
+        self.assertEqual(refuel_checkpoints(500, 500), [])      # one tank is enough
+        self.assertEqual(refuel_checkpoints(499, 500), [])
+        self.assertEqual(refuel_checkpoints(1600, 500), [500, 1000, 1500])
+
+    def test_point_at_mile_interpolates(self):
+        # Straight line, two vertices, 100 miles apart.
+        route = Route(coordinates=[(-100.0, 40.0), (-100.0, 41.0)],
+                      cumulative_miles=[0.0, 100.0],
+                      total_miles=100.0, duration_seconds=0)
+        lat, lon = point_at_mile(route, 50.0)
+        self.assertAlmostEqual(lat, 40.5, places=6)
+        self.assertAlmostEqual(lon, -100.0, places=6)
 
 
-def _brute_force_min_cost(miles, prices, tank_range, mpg):
-    """Exact integer-fuel DP optimum, used to validate the greedy.
-
-    State: (point index, integer fuel level in miles). Buys integer miles of
-    fuel. price[-1] == inf means fuel cannot be bought at the destination.
-    """
-    n = len(miles)
-    R = int(tank_range)
-    INF = math.inf
-    # dp[f] = min cost to be at current point with fuel f (before buying).
-    dp = [INF] * (R + 1)
-    dp[0] = 0.0
-    for i in range(n - 1):
-        gap = int(miles[i + 1] - miles[i])
-        ndp = [INF] * (R + 1)
-        for f in range(R + 1):
-            if dp[f] == INF:
-                continue
-            # Buy b miles of fuel (b=0 if price is inf/destination).
-            max_buy = 0 if math.isinf(prices[i]) else R - f
-            for b in range(0, max_buy + 1):
-                nf = f + b
-                if nf < gap:
-                    continue
-                cost = dp[f] + (b / mpg) * prices[i]
-                arrive = nf - gap
-                if cost < ndp[arrive]:
-                    ndp[arrive] = cost
-        dp = ndp
-    return min(dp)
+def _straight_route():
+    """West->east near latitude 40; ~53 miles per 1-degree lon step."""
+    coords, cum, acc = [], [], 0.0
+    for step in range(25):                 # -100 .. -76  (~24 deg ~ 1273 mi)
+        coords.append((-100.0 + step, 40.0))
+        if step:
+            acc += 53.06
+        cum.append(acc)
+    return Route(coordinates=coords, cumulative_miles=cum,
+                 total_miles=cum[-1], duration_seconds=20 * 3600)
 
 
-class OptimizeTests(TestCase):
-    def test_matches_bruteforce_on_random_instances(self):
-        rng = random.Random(42)
-        mpg = 1.0            # 1 mile per gallon -> tank == range in gallons
-        tank_range = 20
-        for _ in range(200):
-            k = rng.randint(1, 6)          # intermediate stations
-            miles = sorted(rng.sample(range(1, 40), k))
-            total = miles[-1] + rng.randint(1, tank_range)
-            prices = [round(rng.uniform(2.0, 5.0), 2) for _ in miles]
-
-            # points: origin(0) + stations + destination(total)
-            pts = [_fp(0, round(rng.uniform(2.0, 5.0), 2), is_origin=True)]
-            pts += [_fp(m, p) for m, p in zip(miles, prices)]
-            pts.append(_fp(total, math.inf, is_destination=True))
-
-            all_miles = [p.route_mile for p in pts]
-            all_prices = [p.price for p in pts]
-
-            # Skip instances the greedy would (correctly) call infeasible.
-            gaps = [all_miles[i + 1] - all_miles[i] for i in range(len(all_miles) - 1)]
-            if any(g > tank_range for g in gaps):
-                with self.assertRaises(planner.PlanningError):
-                    _optimize(pts, mpg=mpg, tank_range=tank_range)
-                continue
-
-            _, greedy_cost = _optimize(pts, mpg=mpg, tank_range=tank_range)
-            dp_cost = _brute_force_min_cost(all_miles, all_prices, tank_range, mpg)
-            self.assertAlmostEqual(greedy_cost, dp_cost, places=6,
-                                   msg=f"miles={all_miles} prices={all_prices}")
-
-    def test_prefers_cheaper_reachable_station(self):
-        # Origin expensive; a cheap station is within range -> buy minimum at
-        # origin, fill the rest cheap.
-        pts = [
-            _fp(0, 5.00, is_origin=True),
-            _fp(100, 2.00),
-            _fp(400, 9.00),
-            _fp(500, math.inf, is_destination=True),
-        ]
-        stops, cost = _optimize(pts, mpg=10, tank_range=500)
-        # 500 mi -> 50 gal. Buy 10 gal @5 (reach mile100), 40 gal @2 (finish).
-        self.assertAlmostEqual(cost, 10 * 5.0 + 40 * 2.0, places=4)
-        self.assertEqual([s.route_mile for s in stops], [0.0, 100.0])
-
-    def test_infeasible_gap_raises(self):
-        pts = [
-            _fp(0, 3.0, is_origin=True),
-            _fp(700, math.inf, is_destination=True),   # 700 mi > 500 range
-        ]
-        with self.assertRaises(planner.PlanningError):
-            _optimize(pts, mpg=10, tank_range=500)
-
-
-class PlanTripEndToEndTests(TestCase):
+@override_settings()
+class OptimizerSelectionTests(TestCase):
     def setUp(self):
         stations.reset_cache()
-        # A straight west->east corridor near latitude 40. Place stations right
-        # on the route with varying prices.
-        specs = [
-            ("Cheap Start", 40.0, -100.0, 3.00),
-            ("Mid Pricey", 40.0, -97.0, 4.50),
-            ("Mid Cheap", 40.0, -95.0, 2.50),
-            ("Near End", 40.0, -91.0, 3.20),
-        ]
-        for i, (name, lat, lon, price) in enumerate(specs):
-            FuelStation.objects.create(
-                opis_id=i + 1, name=name, address="Hwy", city="Town",
-                state="NE", rack_id=1, retail_price=price,
-                latitude=lat, longitude=lon,
-            )
+
+    def _station(self, name, lat, lon, price):
+        return FuelStation.objects.create(
+            opis_id=abs(hash(name)) % 100000, name=name, address="Hwy",
+            city="Town", state="NE", rack_id=1, retail_price=price,
+            latitude=lat, longitude=lon)
+
+    @override_settings(FUEL_ROUTE={
+        "VEHICLE_RANGE_MILES": 500, "MILES_PER_GALLON": 10,
+        "CORRIDOR_MILES": 5, "SEARCH_RADIUS_MILES": 15,
+        "MAX_SEARCH_RADIUS_MILES": 60, "OSRM_BASE_URL": "", "NOMINATIM_BASE_URL": "",
+        "HTTP_TIMEOUT_SECONDS": 5, "USER_AGENT": "t",
+    })
+    def test_picks_cheapest_within_radius(self):
+        route = _straight_route()
+        # Checkpoint 1 is at mile 500 ~ lon -90.57 (step ~9.42). Put three
+        # stations near there with different prices.
+        cp_lon = -100.0 + 500 / 53.06
+        self._station("Expensive", 40.0, cp_lon, 4.20)
+        self._station("Cheapest", 40.05, cp_lon, 2.80)   # ~3.5 mi off route
+        self._station("Mid", 40.0, cp_lon + 0.05, 3.50)
         stations.reset_cache()
 
-    def _fake_route(self):
-        # ~10 vertices from lon -100 to -90 at lat 40. At lat 40, 1 deg lon is
-        # ~53.06 miles, so total ~530 miles -> forces at least one mid stop.
-        coords, cum, acc = [], [], 0.0
-        prev = None
-        for step in range(11):
-            lon = -100.0 + step  # -100 .. -90
-            lat = 40.0
-            coords.append((lon, lat))
-            if prev is not None:
-                acc += 53.06
-            cum.append(acc)
-            prev = (lon, lat)
-        return osrm.Route(coordinates=coords, cumulative_miles=cum,
-                          total_miles=cum[-1], duration_seconds=9 * 3600)
+        stops = optimize_fuel_stops(route)
+        self.assertGreaterEqual(len(stops), 1)
+        first = stops[0]
+        self.assertEqual(first.station["name"], "Cheapest")
+        self.assertEqual(first.fuel_price, 2.80)
+        self.assertLessEqual(first.distance_from_route, 15)
 
-    def test_plan_trip_produces_optimal_stops(self):
-        gp_start = geocoding.GeoPoint(40.0, -100.0, "Start")
-        gp_finish = geocoding.GeoPoint(40.0, -90.0, "Finish")
-        with mock.patch.object(geocoding, "geocode",
-                               side_effect=[gp_start, gp_finish]), \
-             mock.patch.object(osrm, "get_route", return_value=self._fake_route()):
-            plan = planner.plan_trip("Start", "Finish")
+    @override_settings(FUEL_ROUTE={
+        "VEHICLE_RANGE_MILES": 500, "MILES_PER_GALLON": 10,
+        "CORRIDOR_MILES": 5, "SEARCH_RADIUS_MILES": 15,
+        "MAX_SEARCH_RADIUS_MILES": 60, "OSRM_BASE_URL": "", "NOMINATIM_BASE_URL": "",
+        "HTTP_TIMEOUT_SECONDS": 5, "USER_AGENT": "t",
+    })
+    def test_tie_breaks_on_distance_from_route(self):
+        route = _straight_route()
+        cp_lon = -100.0 + 500 / 53.06
+        self._station("Far same price", 40.12, cp_lon, 3.00)   # ~8 mi off
+        self._station("Near same price", 40.02, cp_lon, 3.00)  # ~1.4 mi off
+        stations.reset_cache()
 
-        self.assertGreater(plan.total_distance_miles, 500)
-        self.assertAlmostEqual(plan.total_gallons,
-                               plan.total_distance_miles / 10, places=2)
-        self.assertGreater(plan.total_fuel_cost, 0)
-        self.assertGreaterEqual(len(plan.fuel_stops), 1)
-        # The expensive mid station ($4.50) should never be chosen over the
-        # cheaper $2.50 option within range.
-        chosen = {s.station["name"] for s in plan.fuel_stops}
-        self.assertNotIn("Mid Pricey", chosen)
+        stops = optimize_fuel_stops(route)
+        self.assertEqual(stops[0].station["name"], "Near same price")
+
+
+class CostServiceTests(TestCase):
+    def _stop(self, n, checkpoint, price):
+        return FuelStop(stop_number=n, checkpoint_mile=checkpoint,
+                        station={"name": "S"}, distance_from_start=checkpoint,
+                        distance_from_route=1.0, fuel_price=price,
+                        selected_reason="test")
+
+    @override_settings(FUEL_ROUTE={
+        "VEHICLE_RANGE_MILES": 500, "MILES_PER_GALLON": 10,
+        "CORRIDOR_MILES": 5, "SEARCH_RADIUS_MILES": 15,
+        "MAX_SEARCH_RADIUS_MILES": 60, "OSRM_BASE_URL": "", "NOMINATIM_BASE_URL": "",
+        "HTTP_TIMEOUT_SECONDS": 5, "USER_AGENT": "t",
+    })
+    def test_gallons_and_cost(self):
+        # 1200-mile trip, stops at 500 and 1000.
+        stops = [self._stop(1, 500, 3.12), self._stop(2, 1000, 3.19)]
+        costing = fuel_cost_service.calculate(1200, stops)
+
+        self.assertEqual(costing.fuel_required_gallons, 120.0)   # 1200/10
+        self.assertEqual(costing.fuel_stops_required, 2)
+        # Stop 1 serves a full 500-mi leg -> 50 gal @3.12 = 156.0
+        self.assertEqual(costing.cost_breakdown[0].gallons, 50.0)
+        self.assertEqual(costing.cost_breakdown[0].cost, 156.0)
+        # Stop 2 serves the final 200-mi leg -> 20 gal @3.19 = 63.8
+        self.assertEqual(costing.cost_breakdown[1].gallons, 20.0)
+        self.assertEqual(costing.cost_breakdown[1].cost, 63.8)
+        self.assertEqual(costing.estimated_total_cost, 156.0 + 63.8)
+
+    @override_settings(FUEL_ROUTE={
+        "VEHICLE_RANGE_MILES": 500, "MILES_PER_GALLON": 10,
+        "CORRIDOR_MILES": 5, "SEARCH_RADIUS_MILES": 15,
+        "MAX_SEARCH_RADIUS_MILES": 60, "OSRM_BASE_URL": "", "NOMINATIM_BASE_URL": "",
+        "HTTP_TIMEOUT_SECONDS": 5, "USER_AGENT": "t",
+    })
+    def test_short_trip_needs_no_stops(self):
+        costing = fuel_cost_service.calculate(400, [])
+        self.assertEqual(costing.fuel_stops_required, 0)
+        self.assertEqual(costing.estimated_total_cost, 0.0)
+        self.assertEqual(costing.fuel_required_gallons, 40.0)

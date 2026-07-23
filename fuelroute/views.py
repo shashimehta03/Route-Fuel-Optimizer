@@ -1,4 +1,9 @@
-"""API views for the Fuel Route planner."""
+"""API views for the Fuel Route planner.
+
+The route generation itself is untouched (``route_service`` -> ``osrm``, one
+call). This layer adds fuel-stop optimization and cost calculation and shapes
+the response.
+"""
 from __future__ import annotations
 
 from django.conf import settings
@@ -10,87 +15,104 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from .serializers import RouteRequestSerializer
-from .services import osrm
+from .services import fuel_cost_service, fuel_optimizer, osrm, route_service
+from .services.fuel_optimizer import FuelStop
 from .services.geocoding import GeocodingError
-from .services.planner import PlanningError, TripPlan, plan_trip
 
 
-def _geojson(plan: TripPlan) -> dict:
-    """FeatureCollection: the route line + a marker per fuel stop."""
+def _fuel_stops_payload(stops: list[FuelStop], costing) -> list[dict]:
+    out = []
+    for s in stops:
+        gallons, cost = costing.per_stop.get(s.stop_number, (0.0, 0.0))
+        st = s.station
+        out.append({
+            "stop_number": s.stop_number,
+            "truck_stop": st["name"],
+            "city": st["city"],
+            "state": st["state"],
+            "address": st["address"],
+            "latitude": st["latitude"],
+            "longitude": st["longitude"],
+            "fuel_price": s.fuel_price,
+            "gallons": gallons,
+            "cost": cost,
+            "distance_from_start": s.distance_from_start,
+            "distance_from_route": s.distance_from_route,
+            "selected_reason": s.selected_reason,
+        })
+    return out
+
+
+def _geojson(route, stops: list[FuelStop]) -> dict:
     features = [{
         "type": "Feature",
         "properties": {"kind": "route",
-                       "distance_miles": plan.total_distance_miles},
-        "geometry": {"type": "LineString", "coordinates": plan.route_coordinates},
+                       "distance_miles": round(route.total_miles, 2)},
+        "geometry": {"type": "LineString", "coordinates": route.coordinates},
     }]
-    for i, stop in enumerate(plan.fuel_stops, start=1):
-        s = stop.station
+    for s in stops:
+        st = s.station
         features.append({
             "type": "Feature",
             "properties": {
                 "kind": "fuel_stop",
-                "order": i,
-                "name": s["name"],
-                "city": s["city"],
-                "state": s["state"],
-                "price_per_gallon": stop.price,
-                "gallons": stop.gallons,
-                "cost": stop.cost,
-                "route_mile": stop.route_mile,
+                "stop_number": s.stop_number,
+                "truck_stop": st["name"],
+                "city": st["city"],
+                "state": st["state"],
+                "fuel_price": s.fuel_price,
+                "distance_from_start": s.distance_from_start,
             },
             "geometry": {"type": "Point",
-                         "coordinates": [s["longitude"], s["latitude"]]},
+                         "coordinates": [st["longitude"], st["latitude"]]},
         })
     return {"type": "FeatureCollection", "features": features}
 
 
-def _serialize(plan: TripPlan, request: Request) -> dict:
+def _build_response(result: route_service.RouteResult, request: Request) -> dict:
     cfg = settings.FUEL_ROUTE
-    stops = [{
-        "order": i,
-        "station": {
-            "name": s.station["name"],
-            "address": s.station["address"],
-            "city": s.station["city"],
-            "state": s.station["state"],
-            "opis_id": s.station["opis_id"],
-            "latitude": s.station["latitude"],
-            "longitude": s.station["longitude"],
-        },
-        "route_mile": s.route_mile,
-        "detour_miles": s.detour_miles,
-        "price_per_gallon": s.price,
-        "gallons_purchased": s.gallons,
-        "cost": s.cost,
-    } for i, s in enumerate(plan.fuel_stops, start=1)]
+    route = result.route
+
+    # Fuel optimization (DB-only station queries) + cost calculation.
+    stops = fuel_optimizer.optimize_fuel_stops(route)
+    costing = fuel_cost_service.calculate(route.total_miles, stops)
 
     map_url = (
         f"{reverse('fuelroute:route-map')}"
-        f"?start={request.query_params.get('start', plan.start['query'])}"
-        f"&finish={request.query_params.get('finish', plan.finish['query'])}"
+        f"?start={request.query_params.get('start', result.start.label)}"
+        f"&finish={request.query_params.get('finish', result.finish.label)}"
     )
 
     return {
-        "start": plan.start,
-        "finish": plan.finish,
+        # --- existing route-generation fields (unchanged) ----------------
+        "start": {"query": result.start.label, "label": result.start.label,
+                  "latitude": result.start.lat, "longitude": result.start.lon},
+        "finish": {"query": result.finish.label, "label": result.finish.label,
+                   "latitude": result.finish.lat, "longitude": result.finish.lon},
         "route": {
-            "total_distance_miles": plan.total_distance_miles,
-            "estimated_duration_hours": plan.duration_hours,
-            "geometry": {
-                "type": "LineString",
-                "coordinates": plan.route_coordinates,
-            },
+            "total_distance_miles": round(route.total_miles, 2),
+            "estimated_duration_hours": round(route.duration_seconds / 3600.0, 2),
+            "geometry": {"type": "LineString", "coordinates": route.coordinates},
         },
-        "fuel": {
-            "vehicle_range_miles": cfg["VEHICLE_RANGE_MILES"],
-            "miles_per_gallon": cfg["MILES_PER_GALLON"],
-            "total_gallons": plan.total_gallons,
-            "total_cost_usd": plan.total_fuel_cost,
-            "number_of_stops": len(stops),
-            "stops": stops,
+        # --- new: fuel optimization + cost -------------------------------
+        "vehicle": {
+            "max_range_miles": cfg["VEHICLE_RANGE_MILES"],
+            "fuel_efficiency_mpg": cfg["MILES_PER_GALLON"],
         },
+        "fuel_summary": {
+            "fuel_required_gallons": costing.fuel_required_gallons,
+            "fuel_stops_required": costing.fuel_stops_required,
+            "estimated_total_cost": costing.estimated_total_cost,
+        },
+        "fuel_stops": _fuel_stops_payload(stops, costing),
+        "cost_breakdown": [
+            {"stop_number": c.stop_number, "gallons": c.gallons,
+             "price": c.price, "cost": c.cost}
+            for c in costing.cost_breakdown
+        ],
+        # --- retained bonus: renderable map ------------------------------
         "map": {
-            "geojson": _geojson(plan),
+            "geojson": _geojson(route, stops),
             "html_map_url": request.build_absolute_uri(map_url),
         },
     }
@@ -108,19 +130,18 @@ def route_plan(request: Request):
     serializer.is_valid(raise_exception=True)
 
     try:
-        plan = plan_trip(serializer.validated_data["start"],
-                         serializer.validated_data["finish"])
+        result = route_service.generate_route(
+            serializer.validated_data["start"],
+            serializer.validated_data["finish"],
+        )
     except GeocodingError as exc:
         return Response({"error": "geocoding_failed", "detail": str(exc)},
                         status=status.HTTP_400_BAD_REQUEST)
     except osrm.RoutingError as exc:
         return Response({"error": "routing_failed", "detail": str(exc)},
                         status=status.HTTP_502_BAD_GATEWAY)
-    except PlanningError as exc:
-        return Response({"error": "planning_failed", "detail": str(exc)},
-                        status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-    return Response(_serialize(plan, request))
+    return Response(_build_response(result, request))
 
 
 def route_map(request):
@@ -131,18 +152,21 @@ def route_map(request):
         return render(request, "fuelroute/map.html",
                       {"error": "Provide ?start= and ?finish= query params."})
     try:
-        plan = plan_trip(start, finish)
-    except (GeocodingError, osrm.RoutingError, PlanningError) as exc:
+        result = route_service.generate_route(start, finish)
+    except (GeocodingError, osrm.RoutingError) as exc:
         return render(request, "fuelroute/map.html", {"error": str(exc)})
 
+    route = result.route
+    stops = fuel_optimizer.optimize_fuel_stops(route)
+    costing = fuel_cost_service.calculate(route.total_miles, stops)
     return render(request, "fuelroute/map.html", {
-        "geojson": _geojson(plan),
+        "geojson": _geojson(route, stops),
         "summary": {
-            "start": plan.start["label"],
-            "finish": plan.finish["label"],
-            "distance": plan.total_distance_miles,
-            "gallons": plan.total_gallons,
-            "cost": plan.total_fuel_cost,
-            "stops": len(plan.fuel_stops),
+            "start": result.start.label,
+            "finish": result.finish.label,
+            "distance": round(route.total_miles, 2),
+            "gallons": costing.fuel_required_gallons,
+            "cost": costing.estimated_total_cost,
+            "stops": len(stops),
         },
     })
